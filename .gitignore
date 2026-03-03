@@ -1,0 +1,33 @@
+fp-info-cache
+# Arquivos de backup do KiCad
+*.bak
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*.000
+*.bck
+*.tmp
+
+# Arquivos de salvamento automático
+_autosave-*
+*-save
+
+# Arquivos de gerados (gerbers, relatórios, PDFs, etc.)
+# É recomendado enviar os gerbers finais, mas não os arquivos de produção temporários
+# /gerber/ # Descomente se quiser ignorar uma pasta específica de gerber
+*.gbr
+*.drl
+*.png
+*.jpg
+*.pdf
+*.csv
+*.net
+
+# Arquivos de configuração específicos do usuário/sistema
+*.kicad_prl
+*.kicad_pcb-bak
+.vscode/
+
+# Se usar repositórios de símbolos/pegadas personalizados locais
+# /custom_libraries/
+circuito-backups/
+
