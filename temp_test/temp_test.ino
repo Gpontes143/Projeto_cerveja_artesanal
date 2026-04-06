@@ -2,61 +2,53 @@
 #include <Wire.h>
 #include <DallasTemperature.h>
 #include <ArduinoJson.h>
-#include <Adafruit_GFX.h> //LCD OLED
-#include <Adafruit_SSD1306.h> //LCD OLED
-
+#include <LiquidCrystal_I2C.h> // Biblioteca do LCD 16x2
+#include <PID_v1.h>            // Biblioteca do PID
 
 // Configuracao do sensor de temperatura
 const short PINODEDADOS = 4;
 unsigned long delaytemp = 0;
 unsigned int contagem_de_erro = 0;
 
-//PID CONTROL
-short temperatura_alvo = 25; // Inicializado com um valor padrão
+// PID E SSR CONTROL
+short temperatura_alvo = 25; 
+const short PINO_SSR = 5; // Pino de sinal para o Relé de Estado Sólido
 
-//Controle da temperatura botao
-unsigned long tempoUltimoClique = 0; // Renomeado para consistência
+double Setpoint, Input, Output;
+// Parâmetros do PID (Ajuste Kp, Ki e Kd conforme a inércia térmica do seu sistema)
+double Kp = 2.0, Ki = 5.0, Kd = 1.0;
+PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+
+// Janela de tempo para o SSR (ex: 5000ms = 5 segundos de ciclo)
+int WindowSize = 5000;
+unsigned long windowStartTime;
+
+// Controle da temperatura botao
+unsigned long tempoUltimoClique = 0;
 const unsigned long intervaloDebounce = 200; 
 const short PINO_BOTAO_AUMENTAR_TEMPERATURA = 26;
 const short PINO_BOTAO_DIMINUIR_TEMPERATURA = 27;
 
-//Display
+// Pinos I2C
 const short sda = 21;
 const short scl = 22;
 
+// Configuração do LCD 16x2 (Endereço I2C geralmente é 0x27 ou 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// Configurações do OLED
-#define SCREEN_WIDTH 128 
-#define SCREEN_HEIGHT 64 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+void atualizarDisplay(float Temperaturaemcelsius, int temp_alvo) {
+  // ---- Atualiza LCD 16x2 ----
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  if(Temperaturaemcelsius <= -127) lcd.print("ERRO");
+  else lcd.print(Temperaturaemcelsius, 1);
+  lcd.print(" C");
 
-void atualizarDisplay(float Temperaturaemcelsius, int temperatura_alvo) {
-  display.clearDisplay();
-  display.setTextColor(WHITE);
-  
-  // Título
-  display.setTextSize(1);
-  display.setCursor(0,0);
-  display.println("TERMOSTATO ESP32");
-  display.drawFastHLine(0, 10, 128, WHITE);
-
-  // Temperatura Real
-  display.setCursor(0, 20);
-  display.print("Real: ");
-  display.setTextSize(2);
-  if(Temperaturaemcelsius <= -127) display.print("ERR");
-  else display.print(Temperaturaemcelsius, 1);
-  display.print(" C");
-
-  // Setpoint (Valor Ajustável)
-  display.setTextSize(1);
-  display.setCursor(0, 45);
-  display.print("Ajuste (Set): ");
-  display.setTextSize(2);
-  display.print(temperatura_alvo);
-  display.print(" C");
-
-  display.display();
+  lcd.setCursor(0, 1);
+  lcd.print("Alvo: ");
+  lcd.print(temp_alvo);
+  lcd.print(" C");
 }
 
 // Definicao do Json criacao
@@ -65,29 +57,28 @@ void atualizarDisplay(float Temperaturaemcelsius, int temperatura_alvo) {
 #define ARDUINOJSON_USE_DOUBLE 0
 #define ARDUINOJSON_USE_LONG_LONG 0
 
-
 void criacao_de_json(float Temperaturaemcelsius){
-  StaticJsonDocument<256> doc; //criando o arquivo para guardar dados do json
+  StaticJsonDocument<256> doc;
 
   doc["sensor"] = "temperatura";
   doc["tempoAtivo"] = millis() / 1000;
   doc["temperatura"] = Temperaturaemcelsius;
   doc["temperatura_alvo"] = temperatura_alvo;
   doc["erros_de_conexao"] = contagem_de_erro;
-  doc.shrinkToFit();  // optional
+  // Adicionando a saída atual do PID ao JSON para monitoramento
+  doc["saida_pid"] = Output; 
+  
+  doc.shrinkToFit();  
   String output; 
   serializeJson(doc, output);
   Serial.println(output);
-  
-  }
-// Instancia um objeto oneWire para comunicar com qualquer dispositivo OneWire
-OneWire oneWire(PINODEDADOS);
+}
 
-// Passa a referência do oneWire para o sensor Dallas Temperature
+// Instancias do Sensor
+OneWire oneWire(PINODEDADOS);
 DallasTemperature sensors(&oneWire);
 
-
-//substituir o delay
+// Substituir o delay
 bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
   unsigned long tempoAtual = millis();
   if (tempoAtual - *ultimoTempo >= intervalo) {
@@ -97,77 +88,105 @@ bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
   return false;
 }
 
-
 void setup() {
-  
-  // Inicia a serial com 115200 baud
   Serial.begin(115200);
-  Serial.println("Demonstração do Sensor DS18B20");
+  Serial.println("Demonstração Termostato PID");
 
-// Inicializa OLED (Endereço comum 0x3C)
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    Serial.println("Falha ao iniciar OLED");
-  }
+  // Configuração dos Pinos
   pinMode(PINO_BOTAO_AUMENTAR_TEMPERATURA, INPUT_PULLUP);
   pinMode(PINO_BOTAO_DIMINUIR_TEMPERATURA, INPUT_PULLUP);
-  //pinMode(pinoRele, OUTPUT);
+  pinMode(PINO_SSR, OUTPUT);
+
+  // Inicializa LCD 16x2
+  lcd.init();
+  lcd.backlight();
+
   // Inicia a biblioteca do sensor
   sensors.begin();
   
-  // Leitura inicial para o display não iniciar vazio
+  // Setup do PID
+  Setpoint = temperatura_alvo;
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(0, WindowSize); // A saída varia de 0 até o tamanho da janela de tempo
+  windowStartTime = millis();
+  
+  // Leitura inicial
   sensors.requestTemperatures();
-  atualizarDisplay(sensors.getTempCByIndex(0), temperatura_alvo);
+  float temp_inicial = sensors.getTempCByIndex(0);
+  Input = temp_inicial;
+  atualizarDisplay(temp_inicial, temperatura_alvo);
 }
 
 void valor_de_temperatura(){
-  // Aguarda 2 segundos antes da próxima leitura
+  // Aguarda 2 segundos antes da próxima leitura do sensor
   if (executarACada(2000, &delaytemp)){  
-    // Solicita que o sensor realize a leitura da temperatura
     sensors.requestTemperatures(); 
-
-    // Obtém a temperatura em Celsius do primeiro sensor (índice 0)
     float Temperaturaemcelsius = sensors.getTempCByIndex(0);
 
-    // Verifica se a leitura é válida (evita erros se o sensor desconectar)
     if(Temperaturaemcelsius != DEVICE_DISCONNECTED_C) {
-    criacao_de_json(Temperaturaemcelsius);
-     atualizarDisplay(Temperaturaemcelsius, temperatura_alvo);
-      
+      Input = Temperaturaemcelsius; // Alimenta o PID com a nova leitura
+      criacao_de_json(Temperaturaemcelsius);
+      atualizarDisplay(Temperaturaemcelsius, temperatura_alvo);
     } else {
       Temperaturaemcelsius = -500;
       contagem_de_erro++;
       criacao_de_json(Temperaturaemcelsius);
       atualizarDisplay(Temperaturaemcelsius, temperatura_alvo);
+      // Opcional: desligar o SSR por segurança se houver erro de leitura
+      digitalWrite(PINO_SSR, LOW);
     }
- }
-
+  }
 }
 
 void lerBotoes() {
-  // Verifica o tempo para evitar o "repique" (bounce) do botão
   if (millis() - tempoUltimoClique > intervaloDebounce) {
-    
+    bool mudou = false;
+
     // Lógica para Aumentar
     if (digitalRead(PINO_BOTAO_AUMENTAR_TEMPERATURA) == LOW) {
       temperatura_alvo++;
-      Serial.printf("Valor alterado para: %d\n", temperatura_alvo);
-      tempoUltimoClique = millis();
-      sensors.requestTemperatures();
-      atualizarDisplay(sensors.getTempCByIndex(0), temperatura_alvo);
+      mudou = true;
     }
 
     // Lógica para Diminuir
     if (digitalRead(PINO_BOTAO_DIMINUIR_TEMPERATURA) == LOW) {
       temperatura_alvo--;
+      mudou = true;
+    }
+
+    // Se houve mudança, atualiza display, PID e Serial
+    if (mudou) {
+      Setpoint = temperatura_alvo; // Atualiza a meta do PID
       Serial.printf("Valor alterado para: %d\n", temperatura_alvo);
       tempoUltimoClique = millis();
-      sensors.requestTemperatures();
-      atualizarDisplay(sensors.getTempCByIndex(0), temperatura_alvo);
+      
+      // Atualiza visualmente imediatamente
+      atualizarDisplay(Input, temperatura_alvo); 
     }
+  }
+}
+
+void controleSSR() {
+  // Calcula a saída do PID
+  myPID.Compute();
+
+  // Controle de Janela de Tempo (Slow PWM) para o SSR
+  unsigned long now = millis();
+  if (now - windowStartTime > WindowSize) { 
+    // Muda a janela
+    windowStartTime += WindowSize;
+  }
+  
+  // Se a saída do PID for maior que o tempo passado nesta janela, liga. Senão, desliga.
+  if (Output > (now - windowStartTime)) {
+    digitalWrite(PINO_SSR, HIGH);
+  } else {
+    digitalWrite(PINO_SSR, LOW);
   }
 }
 
 void loop() {
   lerBotoes(); 
   valor_de_temperatura();
+  controleSSR(); // Mantém o SSR e o PID rodando ativamente a cada ciclo do loop
 }
