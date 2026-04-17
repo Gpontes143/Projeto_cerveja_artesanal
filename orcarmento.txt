@@ -1,0 +1,13 @@
+esp32 devkit
+SSR-40A DA(a 40A pode mudar apos saber a corrente que o fogao consomem, importante)
+dissipador para o SSR-40A
+DS18B20
+Conector femea 
+Conector Macho(tomada) 
+3 leds(2 vermelhos, 1 verde)
+dois botoes
+1 interruptor
+fonte de energia para o esp32
+Cabo de 14 AWG para conexato do fogao
+cabo para sinal 24 a 26 awg, display
+cabo para o led e interruptor 24 AWG

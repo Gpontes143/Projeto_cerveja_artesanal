@@ -13,7 +13,7 @@ unsigned int contagem_de_erro = 0;
 // PID E SSR CONTROL
 short temperatura_alvo = 25; 
 const short PINO_SSR = 5; // Pino de sinal para o Relé de Estado Sólido
-
+short ssr_state = 0;
 double Setpoint, Input, Output;
 // Parâmetros do PID (Ajuste Kp, Ki e Kd conforme a inércia térmica do seu sistema)
 double Kp = 2.0, Ki = 5.0, Kd = 1.0;
@@ -40,15 +40,21 @@ void atualizarDisplay(float Temperaturaemcelsius, int temp_alvo) {
   // ---- Atualiza LCD 16x2 ----
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Temp: ");
+  lcd.print("Temp:");
   if(Temperaturaemcelsius <= -127) lcd.print("ERRO");
   else lcd.print(Temperaturaemcelsius, 1);
   lcd.print(" C");
-
+  
   lcd.setCursor(0, 1);
-  lcd.print("Alvo: ");
+  lcd.print("Alvo:");
   lcd.print(temp_alvo);
   lcd.print(" C");
+  if (ssr_state == 0){
+    lcd.print(" ssr: on");
+  }
+  else if (ssr_state == 1){
+    lcd.print(" ssr: of");
+  }
 }
 
 // Definicao do Json criacao
@@ -124,7 +130,7 @@ void valor_de_temperatura(){
     float Temperaturaemcelsius = sensors.getTempCByIndex(0);
 
     if(Temperaturaemcelsius != DEVICE_DISCONNECTED_C) {
-      Input = Temperaturaemcelsius; // Alimenta o PID com a nova leitura
+      Input = Temperaturaemcelsius;
       criacao_de_json(Temperaturaemcelsius);
       atualizarDisplay(Temperaturaemcelsius, temperatura_alvo);
     } else {
@@ -132,8 +138,9 @@ void valor_de_temperatura(){
       contagem_de_erro++;
       criacao_de_json(Temperaturaemcelsius);
       atualizarDisplay(Temperaturaemcelsius, temperatura_alvo);
-      // Opcional: desligar o SSR por segurança se houver erro de leitura
+      // Opcional: desligar o SSR por segurança 
       digitalWrite(PINO_SSR, LOW);
+
     }
   }
 }
@@ -188,5 +195,5 @@ void controleSSR() {
 void loop() {
   lerBotoes(); 
   valor_de_temperatura();
-  controleSSR(); // Mantém o SSR e o PID rodando ativamente a cada ciclo do loop
+  controleSSR(); 
 }
