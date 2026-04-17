@@ -48,12 +48,12 @@ void atualizarDisplay(float Temperaturaemcelsius, int temp_alvo) {
   lcd.setCursor(0, 1);
   lcd.print("Alvo:");
   lcd.print(temp_alvo);
-  lcd.print(" C");
+  lcd.print("C");
   if (ssr_state == 0){
-    lcd.print(" ssr: on");
+    lcd.print(" ssr:off");
   }
   else if (ssr_state == 1){
-    lcd.print(" ssr: of");
+    lcd.print(" ssr:on");
   }
 }
 
@@ -71,8 +71,8 @@ void criacao_de_json(float Temperaturaemcelsius){
   doc["temperatura"] = Temperaturaemcelsius;
   doc["temperatura_alvo"] = temperatura_alvo;
   doc["erros_de_conexao"] = contagem_de_erro;
-  // Adicionando a saída atual do PID ao JSON para monitoramento
   doc["saida_pid"] = Output; 
+  doc["ssr_state"] = ssr_state;
   
   doc.shrinkToFit();  
   String output; 
@@ -187,7 +187,9 @@ void controleSSR() {
   // Se a saída do PID for maior que o tempo passado nesta janela, liga. Senão, desliga.
   if (Output > (now - windowStartTime)) {
     digitalWrite(PINO_SSR, HIGH);
+    ssr_state = 1;
   } else {
+    ssr_state = 0;
     digitalWrite(PINO_SSR, LOW);
   }
 }
