@@ -22,7 +22,6 @@ double Setpoint, Input, Output;
 
 double Kp = 1500.0, Ki = 10.0, Kd = 50.0;
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
-
 int WindowSize = 5000;
 unsigned long windowStartTime;
 
@@ -61,15 +60,39 @@ struct DadosJson {
 
 QueueHandle_t filaJSON;
 
-void conectarWiFi() {
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
+  unsigned long tempoAtual = millis();
+  if (tempoAtual - *ultimoTempo >= intervalo) {
+    *ultimoTempo = tempoAtual;
+    return true;
   }
-  Serial.println();
-  Serial.println("WiFi conectado");
-  Serial.println(WiFi.localIP());
+  return false;
+}
+
+void taskManterWiFi(void *pvParameters) {
+  unsigned long timerConexao = millis();
+  bool mensagemImpressa = false;
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  for (;;) { // (Núcleo 0)
+    if (WiFi.status() != WL_CONNECTED) {
+      mensagemImpressa = false;
+      if (executarACada(500, &timerConexao)) {
+        Serial.print(".");
+      }
+
+      vTaskDelay(50/portTICK_PERIOD_MS); //tentar se reconectar o mais rapido possivel
+    } else {
+      if (!mensagemImpressa) {
+        Serial.println();
+        Serial.println("WiFi conectado");
+        Serial.println(WiFi.localIP());
+        mensagemImpressa = true;
+      }
+    vTaskDelay(2000 / portTICK_PERIOD_MS); 
+    }
+  }
 }
 
 void enviarParaAPI(const String &payload) {
@@ -146,30 +169,22 @@ void taskProcessaDados(void *pvParameters) {
 
 void enviarParaJSON(float temp) {
   DadosJson dados;
-  dados.temperatura     = temp;
+  dados.temperatura      = temp;
   dados.temperatura_alvo = temperatura_alvo;
-  dados.erros           = contagem_de_erro;
-  dados.saida_pid       = Output;
-  dados.ssr_state       = ssr_state;
-  dados.tempoAtivo      = millis() / 1000;
+  dados.erros            = contagem_de_erro;
+  dados.saida_pid        = Output;
+  dados.ssr_state        = ssr_state;
+  dados.tempoAtivo       = millis() / 1000;
   xQueueSend(filaJSON, &dados, 0);
 }
 
 OneWire oneWire(PINODEDADOS);
 DallasTemperature sensors(&oneWire);
 
-bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
-  unsigned long tempoAtual = millis();
-  if (tempoAtual - *ultimoTempo >= intervalo) {
-    *ultimoTempo = tempoAtual;
-    return true;
-  }
-  return false;
-}
-
 void setup() {
   Serial.begin(115200);
-  conectarWiFi();
+
+  xTaskCreatePinnedToCore(taskManterWiFi, "TaskWiFi", 4096, NULL, 1, NULL, 0);
 
   filaJSON = xQueueCreate(10, sizeof(DadosJson));
   xTaskCreatePinnedToCore(taskProcessaDados, "TaskJSON", 4096, NULL, 1, NULL, 0);
@@ -184,7 +199,9 @@ void setup() {
   sensors.begin();
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
-  delay(750);
+  
+  delay(750); 
+  
   float temp_inicial = sensors.getTempCByIndex(0);
   Input = temp_inicial;
 
@@ -243,8 +260,7 @@ void controleSSR() {
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) conectarWiFi();
   lerBotoes();
-  valor_de_temperatura();
+  valor_de_temperatura(); 
   controleSSR();
 }
