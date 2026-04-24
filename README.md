@@ -1,7 +1,3 @@
-Esta é uma documentação técnica estruturada para o seu projeto de **Controle de Temperatura PID com ESP32**. O código apresenta uma arquitetura robusta, utilizando multitarefa (FreeRTOS) para separar a lógica de controle térmico da comunicação via rede.
-
----
-
 # Documentação do Sistema de Controle Térmico IoT
 
 ## 1. Visão Geral
