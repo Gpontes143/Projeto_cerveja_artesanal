@@ -7,9 +7,9 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-const char* WIFI_SSID = "ZENAIDE";
-const char* WIFI_PASSWORD = "zenaide15031967";
-const char* API_URL = "http://192.168.18.7:1880/api/temperatura";
+const char* WIFI_SSID = "NOME REDE WIFI";
+const char* WIFI_PASSWORD = "SENHA WIFI";
+const char* API_URL = "http://IP:1880/api/temperatura";
 
 const short PINODEDADOS = 4;
 unsigned long delaytemp = 0;
