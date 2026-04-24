@@ -9,7 +9,7 @@
 
 const char* WIFI_SSID = "NOME REDE WIFI";
 const char* WIFI_PASSWORD = "SENHA WIFI";
-const char* API_URL = "http://IP:1880/api/temperatura";
+const char* API_URL = "http://IP:1880/api/temperatura"; //ip da maquina/server
 
 const short PINODEDADOS = 4;
 unsigned long delaytemp = 0;
@@ -60,6 +60,13 @@ struct DadosJson {
 
 QueueHandle_t filaJSON;
 
+/**
+ * @brief Permite a substituição do metodo delay(), que evita o travamento da execução do codigo
+ *
+ * @param intervalo tempo em ms para esperar
+ * @param ultimoTempo anota o tempo atual
+ * @return ao retornar true passou o tempo do intervalo e ao retornar false tem que esperar 
+ */
 bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
   unsigned long tempoAtual = millis();
   if (tempoAtual - *ultimoTempo >= intervalo) {
@@ -69,6 +76,11 @@ bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
   return false;
 }
 
+/**
+ * @brief Roda a parte de Conexão no nucleo 0, deixando indepedente da parte eletrica
+ *
+ * @param pvParameters Regra do FreeRTOS
+ */
 void taskManterWiFi(void *pvParameters) {
   unsigned long timerConexao = millis();
   bool mensagemImpressa = false;
@@ -95,6 +107,11 @@ void taskManterWiFi(void *pvParameters) {
   }
 }
 
+/**
+ * @brief Envia os dados para a api
+ *
+ * @param payload dados em json
+ */
 void enviarParaAPI(const String &payload) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
@@ -111,6 +128,12 @@ void enviarParaAPI(const String &payload) {
 }
 
 // Display só atualiza quando o valor muda — sem lcd.clear()
+/**
+ * @brief Atualiza o Display de forma dinamica
+ *
+ * @param temp  Temperatura em Celsius do sensor
+ * @param temp_alvo Temperatura alvo 
+ */
 void atualizarDisplay(float temp, int temp_alvo) {
   bool mudou = (temp != lastTempDisplay || temp_alvo != lastAlvoDisplay || ssr_state != lastSsrDisplay);
   if (!mudou) return;
@@ -136,6 +159,11 @@ void atualizarDisplay(float temp, int temp_alvo) {
   lcd.print(ssr_state == 1 ? "C ssr:on " : "C ssr:off");
 }
 
+/**
+ * @brief Processa dados e transformar em json para ser enviado ao payload
+ *
+ * @param pvParameters Normas do FreeRTOS
+ */
 void taskProcessaDados(void *pvParameters) {
   const float TENSAO_ESP    = 3.3;
   const float CORRENTE_ESP  = 0.240;  // Amperes
@@ -167,6 +195,11 @@ void taskProcessaDados(void *pvParameters) {
   }
 }
 
+/**
+ * @brief Prepara uma fila para processar esses dados
+ *
+ * @param temp Temperatura
+ */
 void enviarParaJSON(float temp) {
   DadosJson dados;
   dados.temperatura      = temp;
@@ -181,6 +214,9 @@ void enviarParaJSON(float temp) {
 OneWire oneWire(PINODEDADOS);
 DallasTemperature sensors(&oneWire);
 
+/**
+ * @brief inicia os processos e os valores
+ */
 void setup() {
   Serial.begin(115200);
 
@@ -215,6 +251,9 @@ void setup() {
   sensors.requestTemperatures();
 }
 
+/**
+ * @brief le os valores do sensor
+ */
 void valor_de_temperatura() {
   if (executarACada(800, &delaytemp)) {
     float Temperaturaemcelsius = sensors.getTempCByIndex(0);
@@ -233,6 +272,9 @@ void valor_de_temperatura() {
   }
 }
 
+/**
+ * @brief le so o botao foi pressionado
+ */
 void lerBotoes() {
   if (millis() - tempoUltimoClique > intervaloDebounce) {
     bool mudou = false;
@@ -246,6 +288,9 @@ void lerBotoes() {
   }
 }
 
+/**
+ * @brief controla o estado do ssr
+ */
 void controleSSR() {
   myPID.Compute();
   unsigned long now = millis();
