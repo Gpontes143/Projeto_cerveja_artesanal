@@ -5,16 +5,26 @@
 #include <LiquidCrystal_I2C.h>
 #include <PID_v1.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <PubSubClient.h>
 
-const char* WIFI_SSID = "NOME REDE WIFI";
-const char* WIFI_PASSWORD = "SENHA WIFI";
-const char* API_URL = "http://IP:1880/api/temperatura"; //ip da maquina/server
+// ─── WiFi ────────────────────────────────────────────────────────
+const char* WIFI_SSID     = "";
+const char* WIFI_PASSWORD = "";
 
+// ─── MQTT ────────────────────────────────────────────────────────
+const char* MQTT_BROKER    = "";
+const int   MQTT_PORT      = 0000;
+const char* MQTT_USER      = "";
+const char* MQTT_PASSWORD  = "";
+const char* MQTT_CLIENT_ID = "";
+const char* MQTT_TOPIC     = "";
+
+// ─── Sensor DS18B20 ──────────────────────────────────────────────
 const short PINODEDADOS = 4;
 unsigned long delaytemp = 0;
-unsigned int contagem_de_erro = 0;
+unsigned int  contagem_de_erro = 0;
 
+// ─── PID / SSR ───────────────────────────────────────────────────
 short temperatura_alvo = 25;
 const short PINO_SSR = 5;
 short ssr_state = 0;
@@ -22,118 +32,97 @@ double Setpoint, Input, Output;
 
 double Kp = 1500.0, Ki = 10.0, Kd = 50.0;
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+
 int WindowSize = 5000;
 unsigned long windowStartTime;
 
+// ─── Botões ──────────────────────────────────────────────────────
 unsigned long tempoUltimoClique = 0;
 const unsigned long intervaloDebounce = 200;
 const short PINO_BOTAO_AUMENTAR_TEMPERATURA = 26;
 const short PINO_BOTAO_DIMINUIR_TEMPERATURA = 27;
 
+// ─── I2C / LCD ───────────────────────────────────────────────────
 const short sda = 21;
 const short scl = 22;
-
-// Constantes de consumo do ESP32
-const float TENSAO_ESP = 3.3;          // Volts
-const float CORRENTE_ESP_MA = 240.0;   // mA médio com WiFi ativo
-const float POTENCIA_ESP_W = (TENSAO_ESP * CORRENTE_ESP_MA) / 1000.0; // ~0.792W
-
-// Na função enviarParaJSON(), adiciona no doc:
-float tempoHoras = (millis() / 1000.0) / 3600.0;
-float energiaEspWh = POTENCIA_ESP_W * tempoHoras;
-
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// Guarda último valor exibido para só atualizar quando mudar
 float lastTempDisplay = -999;
 short lastAlvoDisplay = -999;
-short lastSsrDisplay = -1;
+short lastSsrDisplay  = -1;
 
+// ─── Constantes de energia ───────────────────────────────────────
+const float TENSAO_ESP   = 3.3;
+const float CORRENTE_ESP = 0.240;
+const float POTENCIA_ESP = TENSAO_ESP * CORRENTE_ESP; // 0.792W
+
+// ─── Fila FreeRTOS ───────────────────────────────────────────────
 struct DadosJson {
   float temperatura;
   short temperatura_alvo;
-  unsigned int erros;
-  double saida_pid;
   short ssr_state;
   unsigned long tempoAtivo;
 };
 
 QueueHandle_t filaJSON;
 
-/**
- * @brief Permite a substituição do metodo delay(), que evita o travamento da execução do codigo
- *
- * @param intervalo tempo em ms para esperar
- * @param ultimoTempo anota o tempo atual
- * @return ao retornar true passou o tempo do intervalo e ao retornar false tem que esperar 
- */
-bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
-  unsigned long tempoAtual = millis();
-  if (tempoAtual - *ultimoTempo >= intervalo) {
-    *ultimoTempo = tempoAtual;
-    return true;
-  }
-  return false;
-}
+// ─── Clientes WiFi/MQTT ──────────────────────────────────────────
+// ✅ Mesmo padrão do código de teste que funcionou
+WiFiClient   wifiClient;
+PubSubClient mqttClient(wifiClient);
 
-/**
- * @brief Roda a parte de Conexão no nucleo 0, deixando indepedente da parte eletrica
- *
- * @param pvParameters Regra do FreeRTOS
- */
-void taskManterWiFi(void *pvParameters) {
-  unsigned long timerConexao = millis();
-  bool mensagemImpressa = false;
+// ─────────────────────────────────────────────────────────────────
+// Reconecta MQTT — chamado no loop(), igual ao código de teste
+// SEM FreeRTOS task, SEM mutex — exatamente como funcionou no teste
+// ─────────────────────────────────────────────────────────────────
+void reconectarMQTT() {
+  if (mqttClient.connected()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.println("[MQTT] Conectando ao broker " + String(MQTT_BROKER) + "...");
+  bool ok = mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD);
+  int  rc  = mqttClient.state();
 
-  for (;;) { // (Núcleo 0)
-    if (WiFi.status() != WL_CONNECTED) {
-      mensagemImpressa = false;
-      if (executarACada(500, &timerConexao)) {
-        Serial.print(".");
-      }
-
-      vTaskDelay(50/portTICK_PERIOD_MS); //tentar se reconectar o mais rapido possivel
-    } else {
-      if (!mensagemImpressa) {
-        Serial.println();
-        Serial.println("WiFi conectado");
-        Serial.println(WiFi.localIP());
-        mensagemImpressa = true;
-      }
-    vTaskDelay(2000 / portTICK_PERIOD_MS); 
-    }
-  }
-}
-
-/**
- * @brief Envia os dados para a api
- *
- * @param payload dados em json
- */
-void enviarParaAPI(const String &payload) {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    http.begin(API_URL);
-    http.addHeader("Content-Type", "application/json");
-    http.setTimeout(3000);
-    int httpResponseCode = http.POST(payload);
-    Serial.print("HTTP Response code: ");
-    Serial.println(httpResponseCode);
-    http.end();
+  if (ok) {
+    Serial.println("[MQTT] Conectado!");
   } else {
-    Serial.println("WiFi desconectado");
+    Serial.println("[MQTT] Falhou rc=" + String(rc));
   }
 }
 
-// Display só atualiza quando o valor muda — sem lcd.clear()
-/**
- * @brief Atualiza o Display de forma dinamica
- *
- * @param temp  Temperatura em Celsius do sensor
- * @param temp_alvo Temperatura alvo 
- */
+// ─────────────────────────────────────────────────────────────────
+// Publica JSON com os campos solicitados:
+// timestamp | temperatura | temperatura_alvo | ssr_state
+// potencia_esp_w | energia_esp_wh
+// ─────────────────────────────────────────────────────────────────
+void publicarMQTT(const DadosJson &dados) {
+  if (!mqttClient.connected()) {
+    Serial.println("[MQTT] Nao conectado — publicacao ignorada");
+    return;
+  }
+
+  float tempoHoras = dados.tempoAtivo / 3600.0;
+  float energiaWh  = POTENCIA_ESP * tempoHoras;
+
+  StaticJsonDocument<256> doc;
+  doc["timestamp"]        = dados.tempoAtivo;
+  doc["temperatura"]      = dados.temperatura;
+  doc["temperatura_alvo"] = dados.temperatura_alvo;
+  doc["ssr_state"]        = dados.ssr_state;
+  doc["potencia_esp_w"]   = POTENCIA_ESP;
+  doc["energia_esp_wh"]   = energiaWh;
+
+  String output;
+  output.reserve(256);
+  serializeJson(doc, output);
+
+  Serial.println(output);
+
+  bool ok = mqttClient.publish(MQTT_TOPIC, output.c_str(), false);
+  Serial.println(ok ? "[MQTT] Publicado!" : "[MQTT] Publicacao falhou");
+}
+
+// ─── Display LCD ─────────────────────────────────────────────────
 void atualizarDisplay(float temp, int temp_alvo) {
   bool mudou = (temp != lastTempDisplay || temp_alvo != lastAlvoDisplay || ssr_state != lastSsrDisplay);
   if (!mudou) return;
@@ -159,89 +148,76 @@ void atualizarDisplay(float temp, int temp_alvo) {
   lcd.print(ssr_state == 1 ? "C ssr:on " : "C ssr:off");
 }
 
-/**
- * @brief Processa dados e transformar em json para ser enviado ao payload
- *
- * @param pvParameters Normas do FreeRTOS
- */
-void taskProcessaDados(void *pvParameters) {
-  const float TENSAO_ESP    = 3.3;
-  const float CORRENTE_ESP  = 0.240;  // Amperes
-  const float POTENCIA_ESP  = TENSAO_ESP * CORRENTE_ESP; // 0.792W
-
-  DadosJson dados;
-  for (;;) {
-    if (xQueueReceive(filaJSON, &dados, portMAX_DELAY)) {
-      float tempoHoras = dados.tempoAtivo / 3600.0;
-      float energiaWh  = POTENCIA_ESP * tempoHoras;
-
-      StaticJsonDocument<200> doc;
-      doc["sensor"]           = "temperatura";
-      doc["tempoAtivo"]       = dados.tempoAtivo;
-      doc["temperatura"]      = dados.temperatura;
-      doc["temperatura_alvo"] = dados.temperatura_alvo;
-      doc["erros_de_conexao"] = dados.erros;
-      doc["saida_pid"]        = dados.saida_pid;
-      doc["ssr_state"]        = dados.ssr_state;
-      doc["potencia_esp_w"]   = POTENCIA_ESP;          // 0.792W fixo
-      doc["energia_esp_wh"]   = energiaWh;             // acumulado
-
-      String output;
-      output.reserve(200);
-      serializeJson(doc, output);
-      Serial.println(output);
-      enviarParaAPI(output);
-    }
-  }
-}
-
-/**
- * @brief Prepara uma fila para processar esses dados
- *
- * @param temp Temperatura
- */
-void enviarParaJSON(float temp) {
-  DadosJson dados;
-  dados.temperatura      = temp;
-  dados.temperatura_alvo = temperatura_alvo;
-  dados.erros            = contagem_de_erro;
-  dados.saida_pid        = Output;
-  dados.ssr_state        = ssr_state;
-  dados.tempoAtivo       = millis() / 1000;
-  xQueueSend(filaJSON, &dados, 0);
-}
-
+// ─────────────────────────────────────────────────────────────────
 OneWire oneWire(PINODEDADOS);
 DallasTemperature sensors(&oneWire);
 
-/**
- * @brief inicia os processos e os valores
- */
+bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
+  unsigned long tempoAtual = millis();
+  if (tempoAtual - *ultimoTempo >= intervalo) {
+    *ultimoTempo = tempoAtual;
+    return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n=== Brewery IoT — ESP32 iniciando ===");
 
-  xTaskCreatePinnedToCore(taskManterWiFi, "TaskWiFi", 4096, NULL, 1, NULL, 0);
+  // ✅ WiFi — mesmo padrão do código de teste
+  Serial.println("[WiFi] Conectando a: " + String(WIFI_SSID));
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  filaJSON = xQueueCreate(10, sizeof(DadosJson));
-  xTaskCreatePinnedToCore(taskProcessaDados, "TaskJSON", 4096, NULL, 1, NULL, 0);
+  int tentativas = 0;
+  while (WiFi.status() != WL_CONNECTED && tentativas < 20) {
+    delay(500);
+    Serial.print(".");
+    tentativas++;
+  }
+  Serial.println();
 
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[WiFi] Conectado!");
+    Serial.println("[WiFi] IP     : " + WiFi.localIP().toString());
+    Serial.println("[WiFi] Gateway: " + WiFi.gatewayIP().toString());
+    Serial.println("[WiFi] RSSI   : " + String(WiFi.RSSI()) + " dBm");
+  } else {
+    Serial.println("[WiFi] FALHOU — verifique SSID e senha");
+  }
+
+  // ✅ MQTT — mesmo padrão do código de teste
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setSocketTimeout(5);
+  mqttClient.setBufferSize(512);
+
+  Serial.println("[MQTT] Broker  : " + String(MQTT_BROKER) + ":" + String(MQTT_PORT));
+  Serial.println("[MQTT] Usuario : " + String(MQTT_USER));
+  Serial.println("[MQTT] ClientID: " + String(MQTT_CLIENT_ID));
+
+  reconectarMQTT();
+
+  // ─── Hardware ────────────────────────────────────────────────
   pinMode(PINO_BOTAO_AUMENTAR_TEMPERATURA, INPUT_PULLUP);
   pinMode(PINO_BOTAO_DIMINUIR_TEMPERATURA, INPUT_PULLUP);
   pinMode(PINO_SSR, OUTPUT);
 
+  Wire.begin(sda, scl);
   lcd.init();
   lcd.backlight();
 
   sensors.begin();
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
-  
-  delay(750); 
-  
-  float temp_inicial = sensors.getTempCByIndex(0);
-  Input = temp_inicial;
+  delay(750);
 
+  float temp_inicial = sensors.getTempCByIndex(0);
+  Input    = temp_inicial;
   Setpoint = temperatura_alvo;
+
   myPID.SetMode(AUTOMATIC);
   myPID.SetOutputLimits(0, WindowSize);
   myPID.SetSampleTime(800);
@@ -249,32 +225,38 @@ void setup() {
   windowStartTime = millis();
   atualizarDisplay(temp_inicial, temperatura_alvo);
   sensors.requestTemperatures();
+
+  Serial.println("=== Setup concluido ===");
 }
 
-/**
- * @brief le os valores do sensor
- */
+// ─────────────────────────────────────────────────────────────────
 void valor_de_temperatura() {
   if (executarACada(800, &delaytemp)) {
-    float Temperaturaemcelsius = sensors.getTempCByIndex(0);
+    float temp = sensors.getTempCByIndex(0);
     sensors.requestTemperatures();
 
-    if (Temperaturaemcelsius != DEVICE_DISCONNECTED_C && Temperaturaemcelsius > -50) {
-      Input = Temperaturaemcelsius;
-      enviarParaJSON(Temperaturaemcelsius);
-      atualizarDisplay(Temperaturaemcelsius, temperatura_alvo);
+    if (temp != DEVICE_DISCONNECTED_C && temp > -50) {
+      Input = temp;
+
+      DadosJson dados;
+      dados.temperatura      = temp;
+      dados.temperatura_alvo = temperatura_alvo;
+      dados.ssr_state        = ssr_state;
+      dados.tempoAtivo       = millis() / 1000;
+
+      publicarMQTT(dados);
+      atualizarDisplay(temp, temperatura_alvo);
     } else {
       contagem_de_erro++;
-      enviarParaJSON(-500);
+      Serial.print("[ERRO] Sensor desconectado! Total erros: ");
+      Serial.println(contagem_de_erro);
       atualizarDisplay(-500, temperatura_alvo);
       digitalWrite(PINO_SSR, LOW);
+      // Nao publica leitura invalida
     }
   }
 }
 
-/**
- * @brief le so o botao foi pressionado
- */
 void lerBotoes() {
   if (millis() - tempoUltimoClique > intervaloDebounce) {
     bool mudou = false;
@@ -288,9 +270,6 @@ void lerBotoes() {
   }
 }
 
-/**
- * @brief controla o estado do ssr
- */
 void controleSSR() {
   myPID.Compute();
   unsigned long now = millis();
@@ -304,8 +283,338 @@ void controleSSR() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// loop() — sem FreeRTOS, sem mutex, sem tasks de rede
+// ✅ Mesmo padrão do código de teste que funcionou
+// ─────────────────────────────────────────────────────────────────
 void loop() {
+  // Reconecta WiFi se cair
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Desconectado — reconectando...");
+    WiFi.reconnect();
+    delay(5000);
+    return;
+  }
+
+  // Reconecta MQTT se cair — nao bloqueia o loop
+  if (!mqttClient.connected()) {
+    reconectarMQTT();
+  }
+
+  // Keepalive MQTT
+  mqttClient.loop();
+
   lerBotoes();
-  valor_de_temperatura(); 
+  valor_de_temperatura();
+  controleSSR();
+}
+#include <OneWire.h>
+#include <Wire.h>
+#include <DallasTemperature.h>
+#include <ArduinoJson.h>
+#include <LiquidCrystal_I2C.h>
+#include <PID_v1.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// ─── WiFi ────────────────────────────────────────────────────────
+const char* WIFI_SSID     = "ZENAIDE";
+const char* WIFI_PASSWORD = "zenaide15031967";
+
+// ─── MQTT ────────────────────────────────────────────────────────
+const char* MQTT_BROKER    = "192.168.18.7";
+const int   MQTT_PORT      = 1883;
+const char* MQTT_USER      = "esp32";
+const char* MQTT_PASSWORD  = "belezafatal";
+const char* MQTT_CLIENT_ID = "esp32-brewery";
+const char* MQTT_TOPIC     = "brewery/sensors/temperature";
+
+// ─── Sensor DS18B20 ──────────────────────────────────────────────
+const short PINODEDADOS = 4;
+unsigned long delaytemp = 0;
+unsigned int  contagem_de_erro = 0;
+
+// ─── PID / SSR ───────────────────────────────────────────────────
+short temperatura_alvo = 25;
+const short PINO_SSR   = 5;
+volatile short ssr_state = 0;
+double Setpoint, Input, Output;
+
+double Kp = 1500.0, Ki = 10.0, Kd = 50.0;
+PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+
+int WindowSize = 5000;
+unsigned long windowStartTime;
+
+// ─── Botões ──────────────────────────────────────────────────────
+unsigned long tempoUltimoClique = 0;
+const unsigned long intervaloDebounce = 200;
+const short PINO_BOTAO_AUMENTAR_TEMPERATURA = 26;
+const short PINO_BOTAO_DIMINUIR_TEMPERATURA = 27;
+
+// ─── I2C / LCD ───────────────────────────────────────────────────
+const short sda = 21;
+const short scl = 22;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+float lastTempDisplay = -999;
+short lastAlvoDisplay = -999;
+short lastSsrDisplay  = -1;
+
+// ─── Constantes de energia ───────────────────────────────────────
+const float TENSAO_ESP   = 3.3;
+const float CORRENTE_ESP = 0.240;
+const float POTENCIA_ESP = TENSAO_ESP * CORRENTE_ESP; // 0.792W
+
+// ─── Fila FreeRTOS ───────────────────────────────────────────────
+struct DadosJson {
+  float temperatura;
+  short temperatura_alvo;
+  short ssr_state;
+  unsigned long tempoAtivo;
+};
+
+QueueHandle_t filaJSON;
+
+// ─── Clientes WiFi/MQTT ──────────────────────────────────────────
+// ✅ Mesmo padrão do código de teste que funcionou
+WiFiClient   wifiClient;
+PubSubClient mqttClient(wifiClient);
+
+// ─────────────────────────────────────────────────────────────────
+// Reconecta MQTT — chamado no loop(), igual ao código de teste
+// SEM FreeRTOS task, SEM mutex — exatamente como funcionou no teste
+// ─────────────────────────────────────────────────────────────────
+void reconectarMQTT() {
+  if (mqttClient.connected()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  Serial.println("[MQTT] Conectando ao broker " + String(MQTT_BROKER) + "...");
+  bool ok = mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD);
+  int  rc  = mqttClient.state();
+
+  if (ok) {
+    Serial.println("[MQTT] Conectado!");
+  } else {
+    Serial.println("[MQTT] Falhou rc=" + String(rc));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Publica JSON com os campos solicitados:
+// timestamp | temperatura | temperatura_alvo | ssr_state
+// potencia_esp_w | energia_esp_wh
+// ─────────────────────────────────────────────────────────────────
+void publicarMQTT(const DadosJson &dados) {
+  if (!mqttClient.connected()) {
+    Serial.println("[MQTT] Nao conectado — publicacao ignorada");
+    return;
+  }
+
+  float tempoHoras = dados.tempoAtivo / 3600.0;
+  float energiaWh  = POTENCIA_ESP * tempoHoras;
+
+  StaticJsonDocument<256> doc;
+  doc["timestamp"]        = dados.tempoAtivo;
+  doc["temperatura"]      = dados.temperatura;
+  doc["temperatura_alvo"] = dados.temperatura_alvo;
+  doc["ssr_state"]        = dados.ssr_state;
+  doc["potencia_esp_w"]   = POTENCIA_ESP;
+  doc["energia_esp_wh"]   = energiaWh;
+
+  String output;
+  output.reserve(256);
+  serializeJson(doc, output);
+
+  Serial.println(output);
+
+  bool ok = mqttClient.publish(MQTT_TOPIC, output.c_str(), false);
+  Serial.println(ok ? "[MQTT] Publicado!" : "[MQTT] Publicacao falhou");
+}
+
+// ─── Display LCD ─────────────────────────────────────────────────
+void atualizarDisplay(float temp, int temp_alvo) {
+  bool mudou = (temp != lastTempDisplay || temp_alvo != lastAlvoDisplay || ssr_state != lastSsrDisplay);
+  if (!mudou) return;
+
+  lastTempDisplay = temp;
+  lastAlvoDisplay = temp_alvo;
+  lastSsrDisplay  = ssr_state;
+
+  lcd.setCursor(0, 0);
+  lcd.print("Temp:");
+  if (temp <= -127) {
+    lcd.print("ERRO ");
+  } else {
+    char buf[8];
+    dtostrf(temp, 5, 1, buf);
+    lcd.print(buf);
+    lcd.print("C");
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print("Alvo:");
+  lcd.print(temp_alvo);
+  lcd.print(ssr_state == 1 ? "C ssr:on " : "C ssr:off");
+}
+
+// ─────────────────────────────────────────────────────────────────
+OneWire oneWire(PINODEDADOS);
+DallasTemperature sensors(&oneWire);
+
+bool executarACada(unsigned long intervalo, unsigned long *ultimoTempo) {
+  unsigned long tempoAtual = millis();
+  if (tempoAtual - *ultimoTempo >= intervalo) {
+    *ultimoTempo = tempoAtual;
+    return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n=== Brewery IoT — ESP32 iniciando ===");
+
+  // ✅ WiFi — mesmo padrão do código de teste
+  Serial.println("[WiFi] Conectando a: " + String(WIFI_SSID));
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int tentativas = 0;
+  while (WiFi.status() != WL_CONNECTED && tentativas < 20) {
+    delay(500);
+    Serial.print(".");
+    tentativas++;
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[WiFi] Conectado!");
+    Serial.println("[WiFi] IP     : " + WiFi.localIP().toString());
+    Serial.println("[WiFi] Gateway: " + WiFi.gatewayIP().toString());
+    Serial.println("[WiFi] RSSI   : " + String(WiFi.RSSI()) + " dBm");
+  } else {
+    Serial.println("[WiFi] FALHOU — verifique SSID e senha");
+  }
+
+  // ✅ MQTT — mesmo padrão do código de teste
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setSocketTimeout(5);
+  mqttClient.setBufferSize(512);
+
+  Serial.println("[MQTT] Broker  : " + String(MQTT_BROKER) + ":" + String(MQTT_PORT));
+  Serial.println("[MQTT] Usuario : " + String(MQTT_USER));
+  Serial.println("[MQTT] ClientID: " + String(MQTT_CLIENT_ID));
+
+  reconectarMQTT();
+
+  // ─── Hardware ────────────────────────────────────────────────
+  pinMode(PINO_BOTAO_AUMENTAR_TEMPERATURA, INPUT_PULLUP);
+  pinMode(PINO_BOTAO_DIMINUIR_TEMPERATURA, INPUT_PULLUP);
+  pinMode(PINO_SSR, OUTPUT);
+
+  Wire.begin(sda, scl);
+  lcd.init();
+  lcd.backlight();
+
+  sensors.begin();
+  sensors.setWaitForConversion(false);
+  sensors.requestTemperatures();
+  delay(750);
+
+  float temp_inicial = sensors.getTempCByIndex(0);
+  Input    = temp_inicial;
+  Setpoint = temperatura_alvo;
+
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(0, WindowSize);
+  myPID.SetSampleTime(800);
+
+  windowStartTime = millis();
+  atualizarDisplay(temp_inicial, temperatura_alvo);
+  sensors.requestTemperatures();
+
+  Serial.println("=== Setup concluido ===");
+}
+
+// ─────────────────────────────────────────────────────────────────
+void valor_de_temperatura() {
+  if (executarACada(800, &delaytemp)) {
+    float temp = sensors.getTempCByIndex(0);
+    sensors.requestTemperatures();
+
+    if (temp != DEVICE_DISCONNECTED_C && temp > -50) {
+      Input = temp;
+
+      DadosJson dados;
+      dados.temperatura      = temp;
+      dados.temperatura_alvo = temperatura_alvo;
+      dados.ssr_state        = ssr_state;
+      dados.tempoAtivo       = millis() / 1000;
+
+      publicarMQTT(dados);
+      atualizarDisplay(temp, temperatura_alvo);
+    } else {
+      contagem_de_erro++;
+      Serial.print("[ERRO] Sensor desconectado! Total erros: ");
+      Serial.println(contagem_de_erro);
+      atualizarDisplay(-500, temperatura_alvo);
+      digitalWrite(PINO_SSR, LOW);
+      // Nao publica leitura invalida
+    }
+  }
+}
+
+void lerBotoes() {
+  if (millis() - tempoUltimoClique > intervaloDebounce) {
+    bool mudou = false;
+    if (digitalRead(PINO_BOTAO_AUMENTAR_TEMPERATURA) == LOW) { temperatura_alvo++; mudou = true; }
+    if (digitalRead(PINO_BOTAO_DIMINUIR_TEMPERATURA) == LOW) { temperatura_alvo--; mudou = true; }
+    if (mudou) {
+      Setpoint = temperatura_alvo;
+      tempoUltimoClique = millis();
+      atualizarDisplay(Input, temperatura_alvo);
+    }
+  }
+}
+
+void controleSSR() {
+  myPID.Compute();
+  unsigned long now = millis();
+  if (now - windowStartTime > WindowSize) windowStartTime += WindowSize;
+  if (Output > (now - windowStartTime)) {
+    digitalWrite(PINO_SSR, HIGH);
+    ssr_state = 1;
+  } else {
+    ssr_state = 0;
+    digitalWrite(PINO_SSR, LOW);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// loop() — sem FreeRTOS, sem mutex, sem tasks de rede
+// ✅ Mesmo padrão do código de teste que funcionou
+// ─────────────────────────────────────────────────────────────────
+void loop() {
+  // Reconecta WiFi se cair
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Desconectado — reconectando...");
+    WiFi.reconnect();
+    delay(5000);
+    return;
+  }
+
+  // Reconecta MQTT se cair — nao bloqueia o loop
+  if (!mqttClient.connected()) {
+    reconectarMQTT();
+  }
+
+  // Keepalive MQTT
+  mqttClient.loop();
+
+  lerBotoes();
+  valor_de_temperatura();
   controleSSR();
 }
